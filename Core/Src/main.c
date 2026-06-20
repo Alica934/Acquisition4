@@ -18,7 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "can.h"
+#include "dma.h"
 #include "iwdg.h"
 #include "tim.h"
 #include "usart.h"
@@ -33,12 +35,12 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define WINDOW 5
+uint32_t ADC_VAL[3];
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -50,6 +52,20 @@
 
 /* USER CODE BEGIN PV */
 uint32_t time_ms = 0;
+
+uint16_t Ready, Emergency, Ignition, Inercia;
+uint16_t adc_st_angle;
+uint16_t adcLeftSuspension;
+uint16_t adcRightSuspension;
+uint16_t angleCAN, leftSusCAN, rightSusCAN;
+float tensao;
+
+//Media movel
+uint32_t buffer[3][WINDOW] = {0};
+uint8_t  idx[3] = {0};
+
+
+
 //CAN
 CAN_TxHeaderTypeDef TxHeader;
 uint8_t TxData[8];
@@ -72,6 +88,17 @@ int _write(int file, char *data, int len) {
 	HAL_UART_Transmit(&huart1, (uint8_t*) data, len, HAL_MAX_DELAY);
 	return len;
 }
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) // necessario?------------------------------------------------------------------
+
+{
+  // Process the data
+}
+
+float MeasureSuspensionPosition(uint16_t bits);
+float MeasureSteeringAngle(uint16_t bits);
+
+uint32_t moving_average(uint32_t new_sample, uint8_t channel);
 
 /* USER CODE END PFP */
 
@@ -113,17 +140,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_CAN1_Init();
   MX_CAN2_Init();
   MX_USART1_UART_Init();
   MX_TIM7_Init();
   MX_IWDG_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim7);
+
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  HAL_ADC_Start_DMA(&hadc1, ADC_VAL, 3);
 	while (1) {
     /* USER CODE END WHILE */
 
@@ -212,25 +244,44 @@ void execute_immediate_tasks() {
 }
 void execute_10ms_tasks() {
 	HAL_IWDG_Refresh(&hiwdg);
+
+	 	  Ready = HAL_GPIO_ReadPin(Ready_To_Drive_GPIO_Port, Ready_To_Drive_Pin);
+		  Emergency = HAL_GPIO_ReadPin(Emergency_Button_GPIO_Port, Emergency_Button_Pin);
+		  Inercia = HAL_GPIO_ReadPin(Inertia_Switch_GPIO_Port, Inertia_Switch_Pin);
+		  Ignition = HAL_GPIO_ReadPin(Ignition_GPIO_Port, Ignition_Pin);
+		  adc_st_angle = ADC_VAL[0];
+		  adcLeftSuspension = ADC_VAL[1];
+		  adcRightSuspension = ADC_VAL[2];
 }
 void execute_50ms_tasks() {
 
+	//medias moveis
+	angleCAN = moving_average(adc_st_angle, 0) * 10;
+	leftSusCAN = moving_average(adcLeftSuspension, 1) * 10;
+	rightSusCAN = moving_average(adcRightSuspension, 2) * 10;
+
 	//CAN Message
 	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.StdId = 0x710;                       // Confirm ID
+	TxHeader.StdId = 0x710;
 	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 6;
+	TxHeader.DLC = 7;
 
-	TxData[0] = 0x0;              // Least significant byte first
-	TxData[1] = 0x1;              // Most significant byte
-	TxData[2] = 0x2;
-	TxData[3] = 0x3;
-	TxData[4] = 0x4;
-	TxData[5] = 0x5;
+	TxData[0] = angleCAN & 0xFF;              // Least significant byte first
+	TxData[1] = (angleCAN >> 8) & 0xFF;             // Most significant byte
+	TxData[2] = leftSusCAN & 0xFF;
+	TxData[3] = (leftSusCAN >> 8) & 0xFF;
+	TxData[4] = rightSusCAN & 0xFF;
+	TxData[5] = (rightSusCAN >> 8) & 0xFF;
+	TxData[6] =((Inercia & 0x1) | ((Emergency & 0x1) << 1)) & 0xFF;
 
 	if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox) != HAL_OK) {
 		Error_Handler();
 	}
+
+	TxHeader.DLC = 2;
+	TxData[0] = Ignition;
+	TxData[1] = Ready;
+
 	if (HAL_CAN_AddTxMessage(&hcan2, &TxHeader, TxData, &TxMailbox) != HAL_OK) {
 		Error_Handler();
 	}
@@ -241,7 +292,78 @@ void execute_100ms_tasks() {
 	HAL_GPIO_TogglePin(HEARTBEAT_GPIO_Port, HEARTBEAT_Pin); //HEARTBEAT
 	//teste USART
 	printf("Esta merda funfa\n");
+
+	printf("Ignition %u\n", Ignition);
+	printf("Ready to drive: %u\n", Ready);
+	printf("Emergency %u\n", Emergency);
+	printf("Inertia %u\n", Inercia);
+	printf("Angle %.2f\n", MeasureSteeringAngle(adc_st_angle));
+	printf("LeftSus %.2f\n", MeasureSuspensionPosition(adcLeftSuspension));
+	printf("RightSus %.2f\n", MeasureSuspensionPosition(adcRightSuspension));
+
 }
+
+//---------------------------------------------------------Funcoes de medida----------------------------------------------//
+float MeasureSuspensionPosition(uint16_t bits)
+{
+  // Constants and Variables
+  float V_SUSP;                                    // Voltage Signal from sensor
+  float sensor_voltage = 5;                       // MAX Voltage level from sensor
+  float MCU_voltage = 3.3;                        // MAX MCU voltage level
+  float Electrical_stroke = 75;                   // mm
+  float SUSPENSION_POSITION;                      // Suspension level in mm
+  float Conversion_Factor = MCU_voltage / sensor_voltage;
+  float volts;                                    // converted voltage
+  // Calculate Voltage from ADC
+  V_SUSP = (MCU_voltage * bits) / 4095;
+  volts = V_SUSP / Conversion_Factor;
+  // Calculate Position
+  SUSPENSION_POSITION = (Electrical_stroke * volts) / sensor_voltage;
+
+  return SUSPENSION_POSITION;                     // return suspension level in millimeters
+}
+
+float MeasureSteeringAngle(uint16_t bits)
+{
+// Constants and variables
+  const float ADC_MAX = 4095.0f;
+  const float MCU_VREF = 3.3f;                    // MCU reference voltage
+  const float SENSOR_VREF_Max = 4.5f;             // Maximum sensor reference voltage
+  const float SENSOR_VREF_Min = 0.5f;             // Minimum sensor reference voltage
+  const float Resolution = 180.0f;                // Resolution of sensor -180 to 180
+  const float OFFSET = 0.0f;                    // In case of mechanical problems, put offset angle
+
+  // Calculate Function Slope
+  float max_v = SENSOR_VREF_Max * (2.0f/3.0f);
+  float min_v = SENSOR_VREF_Min * (2.0f/3.0f);
+  float inclination = 360.0f / (max_v - min_v);
+
+  // Calculate Steering Angle
+  float V_STA = (MCU_VREF * bits) / ADC_MAX;
+  float ST_Angle = inclination * V_STA - 45 - Resolution;
+
+  // If necessary add OFFSET
+  ST_Angle += OFFSET;
+  return ST_Angle;
+}
+
+
+uint32_t moving_average(uint32_t new_sample, uint8_t channel) {
+    buffer[channel][idx[channel]] = new_sample;
+    idx[channel] = (idx[channel] + 1) % WINDOW;
+
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < WINDOW; i++)
+        sum += buffer[channel][i];
+
+    return sum / WINDOW;
+}
+
+
+
+
+
+
 /* USER CODE END 4 */
 
 /**

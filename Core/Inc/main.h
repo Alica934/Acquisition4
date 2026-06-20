@@ -57,6 +57,20 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define StAngle_Pin GPIO_PIN_7
+#define StAngle_GPIO_Port GPIOA
+#define Left_Suspension_Pin GPIO_PIN_0
+#define Left_Suspension_GPIO_Port GPIOB
+#define Right_Suspension_Pin GPIO_PIN_1
+#define Right_Suspension_GPIO_Port GPIOB
+#define Emergency_Button_Pin GPIO_PIN_7
+#define Emergency_Button_GPIO_Port GPIOC
+#define Inertia_Switch_Pin GPIO_PIN_8
+#define Inertia_Switch_GPIO_Port GPIOC
+#define Ignition_Pin GPIO_PIN_9
+#define Ignition_GPIO_Port GPIOC
+#define Ready_To_Drive_Pin GPIO_PIN_8
+#define Ready_To_Drive_GPIO_Port GPIOA
 #define HEARTBEAT_Pin GPIO_PIN_11
 #define HEARTBEAT_GPIO_Port GPIOC
 
